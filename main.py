@@ -2,21 +2,26 @@ from entities.Storage import Storage
 from sklearn.feature_extraction.text import CountVectorizer, TfidfTransformer
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.multiclass import OneVsRestClassifier
-from sklearn.preprocessing import label_binarize
-from sklearn.metrics import roc_curve, auc
+from sklearn.preprocessing import label_binarize, LabelEncoder
+from sklearn.metrics import roc_curve, auc, confusion_matrix, classification_report
 from scipy import interp
+from itertools import cycle
 import matplotlib.pyplot as plt
 import numpy as np
 
 s = Storage()
 count_vect = CountVectorizer()
 tfidf_transformer = TfidfTransformer()
+gradboost = OneVsRestClassifier(GradientBoostingClassifier(random_state=7))
+labels = ["Berdampak positif", "Berdampak negatif", "Netral"]
+le = LabelEncoder()
 
-tprs = []
-aucs = []
-mean_fpr = np.linspace(0, 1, 100)
+all_predict_probas = np.array([])
+all_tests = np.array([])
+fpr = dict()
+tpr = dict()
+roc_auc = dict()
 
-# https://stackoverflow.com/questions/45332410/sklearn-roc-for-multiclass-classification
 for i in range(10):
 	train = s.load(f"data/folds/train{i + 1}.pckl")
 	test = s.load(f"data/folds/test{i + 1}.pckl")
@@ -24,43 +29,72 @@ for i in range(10):
 	train_vect = count_vect.fit_transform(train["Review"])
 	train_tfidf = tfidf_transformer.fit_transform(train_vect)
 
-	gradboost = GradientBoostingClassifier(random_state=7)
 	gradboost.fit(train_tfidf, train["Label"])
 
 	test_vect = count_vect.transform(test["Review"])
 	test_tfidf = tfidf_transformer.transform(test_vect)
-	score = gradboost.score(test_tfidf, test["Label"])
-	print(score)
+	predicted = gradboost.predict_proba(test_tfidf)
+	y_test = le.fit_transform(test["Label"])
+	y_test = label_binarize(y_test, classes=[0, 1, 2])
 
-# 	probas_ = gradboost.predict_proba(test_tfidf)
-# 	fpr, tpr, thresholds = roc_curve(test["Label"], probas_[:, 1])
-# 	tprs.append(interp(mean_fpr, fpr, tpr))
-# 	tprs[-1][0] = 0.0
-# 	roc_auc = auc(fpr, tpr)
-# 	aucs.append(roc_auc)
-# 	plt.plot(fpr, tpr, lw=1, alpha=0.3, label="ROC fold %d (AUC = %0.2f)" % (i + 1, roc_auc))
+	if i == 0:
+		all_predict_probas = predicted
+		all_tests = y_test
+	else:
+		all_predict_probas = np.append(all_predict_probas, predicted, 0)
+		all_tests = np.append(all_tests, y_test, 0)
 
-# plt.plot([0, 1], [0, 1], linestyle='--', lw=2, color='r',
-#          label='Luck', alpha=.8)
+	print(all_predict_probas.shape)
 
-# mean_tpr = np.mean(tprs, axis=0)
-# mean_tpr[-1] = 1.0
-# mean_auc = auc(mean_fpr, mean_tpr)
-# std_auc = np.std(aucs)
-# plt.plot(mean_fpr, mean_tpr, color='b',
-#          label=r'Mean ROC (AUC = %0.2f $\pm$ %0.2f)' % (mean_auc, std_auc),
-#          lw=2, alpha=.8)
+for i in range(len(labels)):
+	fpr[i], tpr[i], _ = roc_curve(all_tests[:, i], all_predict_probas[:, i])
+	roc_auc[i] = auc(fpr[i], tpr[i])
 
-# std_tpr = np.std(tprs, axis=0)
-# tprs_upper = np.minimum(mean_tpr + std_tpr, 1)
-# tprs_lower = np.maximum(mean_tpr - std_tpr, 0)
-# plt.fill_between(mean_fpr, tprs_lower, tprs_upper, color='grey', alpha=.2,
-#                  label=r'$\pm$ 1 std. dev.')
 
-# plt.xlim([-0.05, 1.05])
-# plt.ylim([-0.05, 1.05])
-# plt.xlabel('False Positive Rate')
-# plt.ylabel('True Positive Rate')
-# plt.title('Receiver operating characteristic example')
-# plt.legend(loc="lower right")
-# plt.show()
+# Compute micro-average ROC curve and ROC area
+fpr["micro"], tpr["micro"], _ = roc_curve(all_tests.ravel(), all_predict_probas.ravel())
+roc_auc["micro"] = auc(fpr["micro"], tpr["micro"])
+
+n_classes = len(labels)
+
+# First aggregate all false positive rates
+all_fpr = np.unique(np.concatenate([fpr[i] for i in range(n_classes)]))
+
+# Then interpolate all ROC curves at this points
+mean_tpr = np.zeros_like(all_fpr)
+for i in range(n_classes):
+    mean_tpr += interp(all_fpr, fpr[i], tpr[i])
+
+# Finally average it and compute AUC
+mean_tpr /= n_classes
+
+fpr["macro"] = all_fpr
+tpr["macro"] = mean_tpr
+roc_auc["macro"] = auc(fpr["macro"], tpr["macro"])
+
+plt.figure()
+lw = 2
+plt.plot(fpr["micro"], tpr["micro"],
+         label='micro-average ROC curve (area = {0:0.2f})'
+               ''.format(roc_auc["micro"]),
+         color='deeppink', linestyle=':', linewidth=4)
+
+plt.plot(fpr["macro"], tpr["macro"],
+         label='macro-average ROC curve (area = {0:0.2f})'
+               ''.format(roc_auc["macro"]),
+         color='navy', linestyle=':', linewidth=4)
+
+colors = cycle(['aqua', 'darkorange', 'cornflowerblue'])
+for i, color in zip(range(n_classes), colors):
+    plt.plot(fpr[i], tpr[i], color=color, lw=lw,
+             label='ROC curve of class {0} (area = {1:0.2f})'
+             ''.format(i, roc_auc[i]))
+
+plt.plot([0, 1], [0, 1], color='navy', lw=lw, linestyle='--')
+plt.xlim([0.0, 1.0])
+plt.ylim([0.0, 1.05])
+plt.xlabel('False Positive Rate')
+plt.ylabel('True Positive Rate')
+plt.title('Receiver operating characteristic curve')
+plt.legend(loc="lower right")
+plt.show()
